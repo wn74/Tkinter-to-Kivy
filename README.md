@@ -123,9 +123,9 @@ This repository is currently a Proof of Concept (PoC) demonstrating AST-based la
 - [x] Basic widget extraction (`Label`, `Button`, `Entry`)
 - [x] Basic geometry extraction (`.pack()` mapped to vertical `BoxLayout`)
 - [x] Callback parameter re-scoping (`def f() -> def f(self)`)
-- [ ] Support for `.grid()` to `GridLayout`
-- [ ] Nested hierarchies via `tk.Frame`
-- [ ] Event extraction for `.bind("<Event>", handler)`
+- [x] Support for `.grid()` to `GridLayout`
+- [x] Nested hierarchies via `tk.Frame`
+- [x] Event extraction for `.bind("<Event>", handler)`
 
 ---
 
