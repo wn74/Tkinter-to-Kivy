@@ -7,17 +7,32 @@ import textwrap
 TKINTER_CODE = """
 import tkinter as tk
 
-def submit_action():
-    print("Button was clicked!")
+def on_submit(event=None):
+    print("Submit triggered via click or binding!")
+
+def on_hover(event=None):
+    print("Hover event triggered!")
 
 root = tk.Tk()
-root.title("AST Transpiler App")
+root.title("Advanced Transpiler App")
 
-my_label = tk.Label(root, text="Welcome to the Tkinter to Kivy transpiler!")
-my_label.pack()
+# Nested Hierarchy via tk.Frame
+main_frame = tk.Frame(root)
+main_frame.pack()
 
-my_button = tk.Button(root, text="Submit", command=submit_action)
-my_button.pack()
+header_label = tk.Label(main_frame, text="Grid & Bindings Example")
+header_label.grid(row=0, column=0, columnspan=2)
+
+# Grid Layout mapping
+btn_left = tk.Button(main_frame, text="Left Button", command=on_submit)
+btn_left.grid(row=1, column=0)
+
+btn_right = tk.Button(main_frame, text="Right Button")
+btn_right.grid(row=1, column=1)
+
+# Event extraction via .bind()
+btn_right.bind("<Button-1>", on_submit)
+btn_right.bind("<Enter>", on_hover)
 
 root.mainloop()
 """
@@ -27,22 +42,16 @@ root.mainloop()
 # [2] AST NodeVisitor (Extractor)
 # ==========================================
 class TkinterASTVisitor(ast.NodeVisitor):
-    """
-    Traverses the Python AST to extract Tkinter widget declarations, 
-    their properties (geometry, bindings), and callback functions.
-    """
     def __init__(self):
         self.root_widget = None
-        self.widgets = {}      # Format: {var_name: {type, parent, props, geometry}}
-        self.functions = []    # Stores AST nodes for functions
+        self.widgets = {}      
+        self.functions = []    
 
     def visit_FunctionDef(self, node):
-        # Extract callback functions so we can port them to Kivy App methods
         self.functions.append(node)
         self.generic_visit(node)
 
     def visit_Assign(self, node):
-        # Check if the assignment is a Tkinter widget instantiation (e.g., tk.Label)
         if isinstance(node.value, ast.Call) and self._is_tkinter_call(node.value):
             call = node.value
             widget_type = call.func.attr
@@ -53,30 +62,43 @@ class TkinterASTVisitor(ast.NodeVisitor):
                     
                     if widget_type == 'Tk':
                         self.root_widget = var_name
+                        parent = None
                     else:
                         parent = call.args[0].id if call.args else None
-                        props = {kw.arg: self._extract_value(kw.value) for kw in call.keywords}
-                        
-                        self.widgets[var_name] = {
-                            'type': widget_type,
-                            'parent': parent,
-                            'props': props,
-                            'geom': None
-                        }
+                    
+                    props = {kw.arg: self._extract_value(kw.value) for kw in call.keywords}
+                    
+                    self.widgets[var_name] = {
+                        'type': widget_type,
+                        'parent': parent,
+                        'props': props,
+                        'geom': None,
+                        'geom_props': {},
+                        'bindings': {}
+                    }
         self.generic_visit(node)
 
     def visit_Expr(self, node):
-        # Extract Geometry managers (e.g. my_label.pack())
         if isinstance(node.value, ast.Call):
             call = node.value
             if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
                 var_name = call.func.value.id
                 method = call.func.attr
                 
-                # Check if it's a geometry manager call
-                if var_name in self.widgets and method in ['pack', 'grid', 'place']:
-                    self.widgets[var_name]['geom'] = method
+                if var_name in self.widgets:
+                    # Capture Geometry (.pack(), .grid())
+                    if method in ['pack', 'grid', 'place']:
+                        self.widgets[var_name]['geom'] = method
+                        self.widgets[var_name]['geom_props'] = {
+                            kw.arg: self._extract_value(kw.value) for kw in call.keywords
+                        }
                     
+                    # Capture Bindings (.bind("<Event>", handler))
+                    elif method == 'bind' and len(call.args) == 2:
+                        event_str = self._extract_value(call.args[0])
+                        handler = self._extract_value(call.args[1])
+                        self.widgets[var_name]['bindings'][event_str] = handler
+                        
         self.generic_visit(node)
 
     def _is_tkinter_call(self, call):
@@ -86,9 +108,9 @@ class TkinterASTVisitor(ast.NodeVisitor):
 
     def _extract_value(self, node):
         if isinstance(node, ast.Constant):
-            return node.value # Returns strings, ints, etc.
+            return node.value 
         elif isinstance(node, ast.Name):
-            return node.id    # Returns variable/function names
+            return node.id    
         return None
 
 
@@ -96,19 +118,29 @@ class TkinterASTVisitor(ast.NodeVisitor):
 # [3] Code Generator (Kivy / .kv emitter)
 # ==========================================
 class KivyCodeGenerator:
-    """
-    Takes the extracted metadata from the AST Visitor and emits 
-    pure Kivy Python and KV layout strings.
-    """
     def __init__(self, visitor):
         self.visitor = visitor
         
-        # Mapping simple Tkinter widgets to Kivy equivalents
         self.widget_map = {
             'Label': 'Label',
             'Button': 'Button',
             'Entry': 'TextInput'
         }
+        
+        # Maps Tkinter events to standard Kivy equivalents
+        self.event_map = {
+            '<Button-1>': 'on_press',
+            '<ButtonRelease-1>': 'on_release',
+            '<Return>': 'on_text_validate',
+            '<Enter>': 'on_enter' # Note: Requires Kivy Window/Hover behavior in real apps
+        }
+
+        # Build parent-child hierarchy tree
+        self.tree = {}
+        for name, data in self.visitor.widgets.items():
+            parent = data['parent']
+            if parent is not None:
+                self.tree.setdefault(parent, []).append(name)
 
     def generate(self):
         kv_code = self._generate_kv()
@@ -116,29 +148,71 @@ class KivyCodeGenerator:
         return py_code, kv_code
 
     def _generate_kv(self):
-        # We default to a vertical BoxLayout since .pack() was heavily used
-        kv_lines = [
-            "BoxLayout:", 
-            "    orientation: 'vertical'",
-            "    padding: 20",
-            "    spacing: 10"
-        ]
-
-        for name, data in self.visitor.widgets.items():
-            if not data['geom']: continue # Only render widgets that were packed/placed
-
-            kivy_type = self.widget_map.get(data['type'], 'Widget')
-            kv_lines.append(f"    {kivy_type}:")
-            kv_lines.append(f"        id: {name}")
-
-            for prop, val in data['props'].items():
-                if prop == 'text':
-                    kv_lines.append(f"        text: {repr(val)}")
-                elif prop == 'command':
-                    # Bind Tkinter command to Kivy on_release event
-                    kv_lines.append(f"        on_release: app.{val}()")
-                    
+        if not self.visitor.root_widget:
+            return ""
+            
+        kv_lines = self._render_node(self.visitor.root_widget, depth=0)
         return "\n".join(kv_lines)
+
+    def _render_node(self, name, depth):
+        data = self.visitor.widgets[name]
+        lines = []
+        indent = "    " * depth
+        
+        is_container = name in self.tree or data['type'] == 'Tk'
+        
+        # Determine Kivy layout type for containers
+        if is_container:
+            children = self.tree.get(name, [])
+            child_geoms = [self.visitor.widgets[c]['geom'] for c in children if c in self.visitor.widgets]
+            
+            if 'grid' in child_geoms:
+                kivy_type = 'GridLayout'
+                # Calculate required columns dynamically based on Tkinter grid positions
+                max_col = max((self.visitor.widgets[c]['geom_props'].get('column', 0) for c in children), default=0)
+                cols = max_col + 1
+            else:
+                kivy_type = 'BoxLayout'
+        else:
+            kivy_type = self.widget_map.get(data['type'], 'Widget')
+            
+        # Root node does not get an ID in the layout declaration root
+        if depth == 0:
+            lines.append(f"{kivy_type}:")
+        else:
+            lines.append(f"{indent}{kivy_type}:")
+            lines.append(f"{indent}    id: {name}")
+
+        # Container Properties
+        if is_container:
+            if depth == 0:
+                lines.append(f"{indent}    padding: 20")
+                lines.append(f"{indent}    spacing: 10")
+            if kivy_type == 'GridLayout':
+                lines.append(f"{indent}    cols: {cols}")
+            elif kivy_type == 'BoxLayout':
+                lines.append(f"{indent}    orientation: 'vertical'")
+
+        # Widget Properties
+        for prop, val in data['props'].items():
+            if prop == 'text':
+                lines.append(f"{indent}    text: {repr(val)}")
+            elif prop == 'command':
+                lines.append(f"{indent}    on_release: app.{val}()")
+                
+        # Widget Bindings (extracted from .bind)
+        for event, handler in data['bindings'].items():
+            kivy_event = self.event_map.get(event, 'on_release') # Fallback to on_release
+            lines.append(f"{indent}    {kivy_event}: app.{handler}()")
+
+        # Recurse through children
+        if is_container:
+            for child in self.tree.get(name, []):
+                # Render child only if it was placed in the layout
+                if self.visitor.widgets[child]['geom'] or self.visitor.widgets[child]['type'] == 'Frame':
+                    lines.extend(self._render_node(child, depth + 1))
+                    
+        return lines
 
     def _generate_py(self, kv_code):
         py_lines = [
@@ -150,16 +224,18 @@ class KivyCodeGenerator:
             "class ConvertedApp(App):"
         ]
 
-        # Port extracted Tkinter functions into Kivy App methods
         has_methods = False
         for func_node in self.visitor.functions:
             has_methods = True
             
-            # Inject 'self' argument into the AST node signature for class method context
+            # Inject 'self' argument for App class methods
             if not any(arg.arg == 'self' for arg in func_node.args.args):
                 func_node.args.args.insert(0, ast.arg(arg='self'))
                 
-            # Unparse AST back to string (Requires Python 3.9+)
+            # Inject '*args' to absorb Kivy event arguments seamlessly 
+            # (since Tkinter .bind() handlers accept an 'event' object)
+            func_node.args.vararg = ast.arg(arg='args')
+                
             method_code = ast.unparse(func_node)
             py_lines.extend(textwrap.indent(method_code, "    ").split('\n'))
             py_lines.append("")
@@ -167,7 +243,6 @@ class KivyCodeGenerator:
         if not has_methods:
             py_lines.append("    pass")
 
-        # Build method loading the KV layout
         py_lines.append("    def build(self):")
         py_lines.append("        return Builder.load_string(KV_LAYOUT)")
         py_lines.append("")
@@ -178,21 +253,18 @@ class KivyCodeGenerator:
 
 
 # ==========================================
-# [4] Pipeline Execution (Bringing it together)
+# [4] Pipeline Execution
 # ==========================================
 if __name__ == "__main__":
     print("--- 1. Original Tkinter Code ---")
     print(TKINTER_CODE.strip())
     print("\n" + "="*50 + "\n")
 
-    # Step A: [Python ast.parse]
     parsed_ast = ast.parse(TKINTER_CODE)
 
-    # Step B: [AST NodeVisitor]
     visitor = TkinterASTVisitor()
     visitor.visit(parsed_ast)
 
-    # Step C: [Code Generator]
     generator = KivyCodeGenerator(visitor)
     kivy_py, kivy_kv = generator.generate()
 
