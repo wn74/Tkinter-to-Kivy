@@ -1,17 +1,6 @@
-# Tkinter-to-Kivy
+# Tkinter to Kivy
 
 > **Warning:** This project is fully AI-generated. The code, architecture, and documentation were created by an artificial intelligence model and are provided as an experimental proof of concept. Review and test thoroughly before production use.
-
-An AST-based Python transpiler that automatically converts Tkinter code into modern Kivy applications and .kv layout declarations.
-
----
-
-### `README.md`
-
-```markdown
-# Tk2Kivy Transpiler
-
-An Abstract Syntax Tree (AST) transpiler that extracts GUI widget declarations, geometries, and callbacks from Tkinter code and generates Kivy application code and .kv layouts.
 
 ---
 
@@ -26,10 +15,10 @@ Migrating desktop GUIs from Tkinter to cross-platform frameworks like Kivy usual
 [Python ast.parse]
          |
          v
-[AST NodeVisitor]  --> Extracts widgets, properties, geometry, and callbacks
+[AST NodeVisitor]  --> Extracts widgets, nested Frames, grid/pack geometry, and bindings
          |
          v
-[Code Generator]   --> Emits Kivy Python + .kv Layout string
+[Code Generator]   --> Emits runnable Kivy Python application + .kv layout string
 ```
 
 ---
@@ -37,16 +26,23 @@ Migrating desktop GUIs from Tkinter to cross-platform frameworks like Kivy usual
 ## Features
 
 - AST-Powered Parsing: Safe, static inspection of Python source code without executing runtime scripts.
-- Widget Translation: Converts `tk.Label`, `tk.Button`, and `tk.Entry` into native Kivy UI components (`Label`, `Button`, `TextInput`).
-- Callback and Binding Migration: Automatically converts Tkinter `command=func` callbacks into Kivy-compatible `on_release: app.func()` methods and injects `self`.
-- Zero External Dependencies: Built entirely using Python standard libraries (`ast`, `textwrap`).
+- Nested Layouts: Recursively processes `tk.Frame` hierarchies and maps them to nested Kivy containers.
+- Dynamic Geometry Inference:
+  - Stacks via `.pack()` are mapped to vertical `BoxLayout`.
+  - Matrix forms via `.grid()` are automatically converted to `GridLayout`, calculating the required `cols` attribute dynamically.
+- Widget Translation: Maps `tk.Label`, `tk.Button`, and `tk.Entry` to Kivy's `Label`, `Button`, and `TextInput`.
+- Event and Binding Handling:
+  - Translates `command=func` to `on_release: app.func()`.
+  - Maps common `.bind(...)` events (e.g., `<Button-1>` to `on_press`, `<Return>` to `on_text_validate`).
+  - Automatically comments out unsupported touch/hover events (e.g., `<Enter>`) to prevent runtime Kivy `BuilderException` errors.
+- Callback Parameter Re-scoping: Converts functions into class methods by automatically injecting `self` and `*args`.
 
 ---
 
 ## Requirements
 
-- Python 3.9+ (uses `ast.unparse`)
-- Kivy (only needed to run the emitted output code):
+- Python 3.9 to 3.12 (Python 3.11 or 3.12 recommended on Windows for pre-built Kivy wheels).
+- Kivy (required to run the generated output file):
   ```bash
   pip install kivy
   ```
@@ -55,36 +51,66 @@ Migrating desktop GUIs from Tkinter to cross-platform frameworks like Kivy usual
 
 ## Usage
 
-### 1. Run the Transpiler
-
-Clone the repository and run the transpiler script:
+### 1. Setup the Environment
 
 ```bash
-git clone https://github.com/your-username/tk2kivy-transpiler.git
-cd tk2kivy-transpiler
+python -m pip install --upgrade pip
+pip install kivy
+```
+
+*(Note: If you have Python 3.14+ installed globally on Windows, create a Python 3.12 virtual environment first with `py -3.12 -m venv .venv` and activate it before installing Kivy).*
+
+### 2. Run the Transpiler
+
+Transpile a Tkinter script into a Kivy script:
+
+```bash
+python transpiler.py input_tk.py output_kivy.py
+```
+
+If run without arguments, it defaults to reading `input_tk.py` and writing to `output_kivy.py`:
+
+```bash
 python transpiler.py
 ```
 
-### 2. Input vs. Output Example
+### 3. Run the Generated App
 
-#### Input (Tkinter)
+```bash
+python output_kivy.py
+```
+
+---
+
+## Input vs. Output Example
+
+### Input (Tkinter)
 ```python
 import tkinter as tk
 
-def on_click():
-    print("Button pressed!")
+def submit_form(event=None):
+    print("Form submitted!")
 
 root = tk.Tk()
-label = tk.Label(root, text="Hello, Tkinter!")
-label.pack()
+root.title("Registration")
 
-button = tk.Button(root, text="Click Me", command=on_click)
-button.pack()
+form_frame = tk.Frame(root)
+form_frame.pack()
+
+username_label = tk.Label(form_frame, text="Username:")
+username_label.grid(row=0, column=0)
+
+username_entry = tk.Entry(form_frame)
+username_entry.grid(row=0, column=1)
+username_entry.bind("<Return>", submit_form)
+
+submit_btn = tk.Button(root, text="Submit", command=submit_form)
+submit_btn.pack()
 
 root.mainloop()
 ```
 
-#### Transpiled Output (Kivy)
+### Transpiled Output (Kivy)
 ```python
 from kivy.app import App
 from kivy.lang import Builder
@@ -94,18 +120,24 @@ BoxLayout:
     orientation: 'vertical'
     padding: 20
     spacing: 10
-    Label:
-        id: label
-        text: 'Hello, Tkinter!'
+    GridLayout:
+        id: form_frame
+        cols: 2
+        Label:
+            id: username_label
+            text: 'Username:'
+        TextInput:
+            id: username_entry
+            on_text_validate: app.submit_form()
     Button:
-        id: button
-        text: 'Click Me'
-        on_release: app.on_click()
+        id: submit_btn
+        text: 'Submit'
+        on_release: app.submit_form()
 """
 
 class ConvertedApp(App):
-    def on_click(self):
-        print("Button pressed!")
+    def submit_form(self, *args, event=None):
+        print("Form submitted!")
 
     def build(self):
         return Builder.load_string(KV_LAYOUT)
@@ -113,19 +145,6 @@ class ConvertedApp(App):
 if __name__ == '__main__':
     ConvertedApp().run()
 ```
-
----
-
-## Roadmap and Limitations
-
-This repository is currently a Proof of Concept (PoC) demonstrating AST-based layout transpilation:
-
-- [x] Basic widget extraction (`Label`, `Button`, `Entry`)
-- [x] Basic geometry extraction (`.pack()` mapped to vertical `BoxLayout`)
-- [x] Callback parameter re-scoping (`def f() -> def f(self)`)
-- [x] Support for `.grid()` to `GridLayout`
-- [x] Nested hierarchies via `tk.Frame`
-- [x] Event extraction for `.bind("<Event>", handler)`
 
 ---
 
